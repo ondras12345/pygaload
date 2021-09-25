@@ -145,9 +145,7 @@ The protocol is as follows:
 """
 
 import sys
-import os
-import termios
-import select
+import serial
 import time
 import array
 import codecs
@@ -313,43 +311,15 @@ def readHEX(options, args):
 
 
 def openDevice(options):
-    try:
-        dev = os.open(options.DevicePort, os.O_RDWR | os.O_NOCTTY | os.O_NDELAY)
-    except Exception as detail:
-        print(f"Unable to open device '{options.DevicePort}':\n {str(detail)}")
-        sys.exit(1)
+    dev = serial.Serial()
+    dev.port = options.DevicePort
+    dev.baudrate = options.BaudRate
+    # Two stop bits seems to work better in some cases.
+    dev.stopbits = 2
+    dev.timeout = 3
 
+    dev.open()
     _LOGGER.info(f"Opened {options.DevicePort} ...")
-
-    try:
-        baudmask = getattr(termios, f"B{options.BaudRate}")
-    except AttributeError:
-        print(f"Unable to set baud rate to {options.BaudRate}")
-        sys.exit(1)
-
-    try:
-        # TCGETADDR returns a list:
-        #     [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
-        attr = termios.tcgetattr(dev)
-        attr[0] = termios.IGNBRK  # Leave termios.IGNPAR unset so framing errors translate characters to \0
-        attr[1] = 0
-        # Two stop bits seems to work better in some cases, hence CSTOPB.
-        attr[2] = termios.CSTOPB | termios.CS8 | termios.CREAD | termios.CLOCAL | baudmask
-        attr[3] = 0
-        attr[4] = baudmask
-        attr[5] = baudmask
-
-        # By setting VMIN to 0 and VTIME to non-zero, a read will return when
-        # either 1 character has been received or the time has elapsed. But this
-        # doesn't seem to work, so we use poll() and that seems to work fine.
-        attr[6][termios.VMIN] = 1  # minimum characters to fulfill a read request
-        attr[6][termios.VTIME] = 0  # deciseconds to wait for reads
-        termios.tcsetattr(dev, termios.TCSAFLUSH, attr)
-    except termios.error:
-        print(f"Unable to set terminal attributes on device {options.DevicePort}")
-        sys.exit(1)
-
-    _LOGGER.info(f"Set terminal attributes on {options.DevicePort} ...")
 
     return dev
 
@@ -377,18 +347,18 @@ def doConnect(options):
 
     tic = time.time()
     while (time.time()-tic) < options.Timeout:
-        L = poll.poll(1000)
-        if L:
-            c = ord(os.read(options.dev, 1))
+        c = options.dev.read(1)
+        if c:
+            c = ord(c)
             _LOGGER.debug(f"char received: {c}")
 
             if state == CONNECT:
                 if c == 0x55:  # For MegaLoad 4 and 5
-                    os.write(options.dev, b'\x55')
+                    options.dev.write(b'\x55')
                     state = SYNCED4
                     P.loaderversion = 4
                 elif c == 0x3E:  # For MegaLoad 3
-                    os.write(options.dev, b'\x3C')
+                    options.dev.write(b'\x3C')
                     state = SYNCED3    # Maybe it's just junk, though, from a MegaLoad 4 bootloader
                     P.loaderversion = 3
                     _LOGGER.info("MegaLoad 3 detected")
@@ -407,7 +377,7 @@ def doConnect(options):
                         if c == 0x55:    # We're in auto-OSCCAL
                             pass
                         elif c == 0x3E:  # MegaLoad 5 sends '>'
-                            os.write(options.dev, '\x3C')
+                            options.dev.write('\x3C')
                             P.loaderversion = 5
                         else:
                             print('*** Unexpected processor type code: %s' % hex(c))
@@ -567,12 +537,9 @@ def downloadFlash(options, proc, datalines):
                         if (ix & 0x0F) == 0x0F:
                             print("", file=dumpfid)
                 else:
-                    #print 'Writing length-%d string' % len(towrite)
-                    os.write(options.dev, bytes([(pagenum >> 8) & 0xFF]))
-                    os.write(options.dev, bytes([pagenum & 0xFF]))
-                    #for ix in range(len(towrite)):
-                    #    os.write(options.dev, towrite[ix])
-                    os.write(options.dev, towrite)
+                    options.dev.write(bytes([(pagenum >> 8) & 0xFF]))
+                    options.dev.write(bytes([pagenum & 0xFF]))
+                    options.dev.write(towrite)
 
                 checksum = 0
                 for ix in range(len(towrite)):
@@ -581,8 +548,8 @@ def downloadFlash(options, proc, datalines):
                 if options.Debug:
                     print("Checksum:", hex(checksum & 0xFF), file=dumpfid)
                 else:
-                    #print 'Writing checksum:', chr(checksum & 0xFF)
-                    os.write(options.dev, bytes([checksum & 0xFF]))
+                    _LOGGER.debug(f"Writing checksum: {chr(checksum & 0xFF)}")
+                    options.dev.write(bytes([checksum & 0xFF]))
 
                 if options.Debug:
                     if 0:
@@ -595,11 +562,8 @@ def downloadFlash(options, proc, datalines):
                     else:
                         c = ord('!')
                 else:
-                    L = options.poll.poll(3000)
-                    if L:
-                        c = ord(os.read(options.dev, 1))
-                    else:
-                        c = None
+                    c = options.dev.read(1)
+                    c = ord(c) if c else None
 
                 if c is not None:
                     if c == 0x21:
@@ -620,10 +584,10 @@ def downloadFlash(options, proc, datalines):
                 return 0
 
     # Flash writing is all done...we must send a page number of 0xFFFF
-    os.write(options.dev, b'\xFF\xFF')
+    options.dev.write(b'\xFF\xFF')
 
     if options.Verbose:
-        print
+        print()
     return 1
 
 
@@ -681,14 +645,10 @@ Grand Valley State University
         dev = openDevice(options)
         options.dev = dev
 
-        poll = select.poll()
-        poll.register(dev, select.POLLIN | select.POLLPRI)
-        options.poll = poll
-
         if options.SendReset is not None:
             _LOGGER.info("Sending reset string ...")
             s = codecs.decode(options.SendReset, 'unicode_escape').encode('ascii')
-            os.write(options.dev, s)
+            options.dev.write(s)
 
         _LOGGER.info('Waiting for bootloader to connect ...')
 
