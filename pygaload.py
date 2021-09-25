@@ -151,6 +151,7 @@ import array
 import codecs
 import logging
 from optparse import OptionParser
+from intelhex import IntelHex
 
 VERSION_MAJOR = 1
 VERSION_MINOR = 1
@@ -241,69 +242,6 @@ EEPROMSize = {
     0x33: 2048,
     0x34: 4096
 }
-
-
-def parse8(line, offset):
-    return int(line[offset:offset+2], 16)
-
-
-def parse16(line, offset):
-    return parse8(line, offset)*256 + parse8(line, offset+2)
-
-
-def readHEX(options, args):
-    try:
-        fid = open(args[0], 'rt')
-    except Exception as detail:
-        print(f"Unable to open HEX file:\n    {str(detail)}")
-        sys.exit(1)
-
-    datalines = []
-    linenum = 0
-    for line in fid:
-        linenum += 1
-
-        line = line.strip()
-        if line[0] != ':':
-            print(f"Line does not begin with ':' at file {args[0]} line #{linenum}")
-            sys.exit(1)
-
-        if len(line) < 11:
-            print(f"Line too short at file {args[0]} line #{linenum}")
-            sys.exit(1)
-
-        numBytes = parse8(line, 1)
-        if len(line) != numBytes*2 + 11:
-            print(f"Line length does not match byte count at file {args[0]} line #{linenum}")
-            sys.exit(1)
-
-        addr = parse16(line, 3)
-        rectype = parse8(line, 7)
-
-        if rectype == 0x01:
-            break
-
-        if rectype != 0:
-            print("Unexpected record type %d at file %s line #%d" % (rectype, args[0], linenum))
-            sys.exit(1)
-
-        checksum = rectype + numBytes + addr + (addr >> 8)
-        data = array.array('B', b'\xFF'*numBytes)  # Type 'B' is unsigned char stored as Python int's
-
-        for i in range(numBytes):
-            data[i] = parse8(line, 2*i+9)
-            checksum += data[i]
-
-        checksum += parse8(line, 2*numBytes+9)
-        if (checksum & 0xFF) != 0:
-            print("Record checksum error at file %s line #%d" % (args[0], linenum))
-
-        datalines.append((addr, data))
-
-    fid.close()
-
-    datalines.sort()    # by starting address
-    return datalines
 
 
 def openDevice(options):
@@ -457,14 +395,13 @@ def doConnect(options):
     return None
 
 
-def downloadFlash(options, proc, datalines):
+def downloadFlash(options, proc, hex_data):
     # Basic checks:
     #     - make sure we're not going beyond max address where bootloader starts
     #     - make sure flash is an integer number of pages
     #     - make sure boot section is an integer number of pages
 
-    lastAddr = datalines[-1][0]
-    lastAddr += len(datalines[-1][1])
+    lastAddr = max(hex_data)
 
     if lastAddr > (proc.flash - proc.boot):
         print('*** HEX file contents extends into bootloader')
@@ -482,11 +419,6 @@ def downloadFlash(options, proc, datalines):
 
     emptypage = b'\xFF'*proc.page
 
-    datalinesix = 0
-    addr = datalines[datalinesix][0]
-    data = datalines[datalinesix][1]
-    addrix = 0
-
     if options.Debug:
         dumpfid = open('dump.txt', 'wt')
 
@@ -498,29 +430,17 @@ def downloadFlash(options, proc, datalines):
             print(f"\r        Page {pagenum} ...",)
             sys.stdout.flush()
 
-        if addr >= endAddr:
-            # Next byte to write is past this page
-            continue
-
         page = array.array('B', emptypage)
 
-        while 1:
-            while (addrix < len(data)) and (addr < endAddr):
-                page[addr-startAddr] = data[addrix]
-                addrix += 1
-                addr += 1
+        has_data = False
+        for addr in range(startAddr, endAddr):
+            if addr in hex_data:
+                page[addr - startAddr] = hex_data[addr]
+                has_data = True
 
-            if addrix >= len(data):
-                datalinesix += 1
-                if datalinesix < len(datalines):
-                    addr = datalines[datalinesix][0]
-                    data = datalines[datalinesix][1]
-                    addrix = 0
-                else:
-                    break
-
-            if addr >= endAddr:
-                break
+        if not has_data:
+            # Next byte to write is past this page
+            continue
 
         towrite = page.tobytes()
 
@@ -544,7 +464,7 @@ def downloadFlash(options, proc, datalines):
                 if options.Debug:
                     print("Checksum:", hex(checksum & 0xFF), file=dumpfid)
                 else:
-                    _LOGGER.debug(f"Writing checksum: {chr(checksum & 0xFF)}")
+                    _LOGGER.debug(f"Writing checksum: {checksum & 0xFF}")
                     options.dev.write(bytes([checksum & 0xFF]))
 
                 if options.Debug:
@@ -623,8 +543,9 @@ Grand Valley State University
     if len(args) != 1:
         parser.error("You must specify a HEX file for programming")
 
-    datalines = readHEX(options, args)
-    if not datalines:
+    ih = IntelHex(args[0])
+    hex_data = ih.todict()
+    if not hex_data:
         print('*** HEX file is empty...nothing to download')
         sys.exit(1)
 
@@ -663,7 +584,7 @@ Grand Valley State University
         print('*** Downloading failed')
         sys.exit(1)
 
-    if downloadFlash(options, proc, datalines):
+    if downloadFlash(options, proc, hex_data):
         print('Downloading successful')
     else:
         print('*** Downloading failed')
