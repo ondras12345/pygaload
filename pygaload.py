@@ -150,22 +150,11 @@ import time
 import array
 import codecs
 import logging
-from optparse import OptionParser
+import argparse
 from intelhex import IntelHex
 
 VERSION_MAJOR = 1
 VERSION_MINOR = 1
-
-_usage = """\
-%prog [Options] prog.hex
-
-The 'prog.hex' file must be the file to download in HEX format.
-
-The optional reset string (--send-reset parameter) can include C-style control
-characters such as \\n and \\r. For example:
-
-        pygaload.py --send-reset='reset\\r\\n' ...
-        pygaload.py --send-reset='\\x03' ...    """
 
 Default_DevicePort = "/dev/ttyUSB0"
 Default_BaudRate = 38400
@@ -508,23 +497,29 @@ def downloadFlash(options, proc, hex_data):
 
 
 if __name__ == "__main__":
-    parser = OptionParser(usage=_usage)
-    parser.add_option("-p", "--port", dest="DevicePort",
-                      help="Device port for communication (default: %s)" % Default_DevicePort,
-                      metavar="DEV", default=Default_DevicePort)
-    parser.add_option("-b", "--baud-rate", type="int", dest="BaudRate", help="Baud rate (default: %d)" % Default_BaudRate,
-                      metavar="BAUD", default=Default_BaudRate)
-    parser.add_option("-V", "--verbose", dest="Verbose", action="count", default=False, help="Print verbose progress reports (-VV is DEBUG)")
-    parser.add_option("-t", "--timeout", dest="Timeout", type="float", default=Default_Timeout,
-                      help="How long to wait for bootloader response (default: %g seconds)" % Default_Timeout, metavar="SEC")
-    parser.add_option("-D", "--debug", dest="Debug", action="store_true", default=False, help="Debugging mode (not for normal use)")
-    parser.add_option("-s", "--send-reset", dest="SendReset", metavar="STRING", default=None,
-                      help="String to send to invoke bootloader")
-    parser.add_option("-v", "--version", dest="Version", action="store_true", default=False, help="Print version info and exit")
-    parser.add_option("--workaround-evb", action="store_true", default=False,
-                      help="work around an issue with EvB 5.1")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--port", dest="DevicePort",
+                        help="Device port for communication (default: %s)" % Default_DevicePort,
+                        metavar="DEV", default=Default_DevicePort)
+    parser.add_argument("-b", "--baud-rate", type=int, dest="BaudRate", help="Baud rate (default: %d)" % Default_BaudRate,
+                        metavar="BAUD", default=Default_BaudRate)
+    parser.add_argument("-V", "--verbose", dest="Verbose", action="count", default=False, help="Print verbose progress reports (-VV is DEBUG)")
+    parser.add_argument("-t", "--timeout", dest="Timeout", type=float, default=Default_Timeout,
+                        help="How long to wait for bootloader response (default: %g seconds)" % Default_Timeout, metavar="SEC")
+    parser.add_argument("-D", "--debug", dest="Debug", action="store_true", default=False, help="Debugging mode (not for normal use)")
+    parser.add_argument("-s", "--send-reset", dest="SendReset", metavar="STRING", default=None,
+                        help="String to send to invoke bootloader. "
+                             "Can include C-style control characters such as "
+                             "\\n and \\r. For example: "
+                             "--send-reset='reset\\r\\n' or "
+                             "--send-reset='\\x03'")
+    parser.add_argument("-v", "--version", dest="Version", action="store_true", default=False, help="Print version info and exit")
+    parser.add_argument("--workaround-evb", action="store_true", default=False,
+                        help="work around an issue with EvB 5.1")
+    parser.add_argument("programfile", type=argparse.FileType("r"),
+                        help="file to download (in HEX format)")
 
-    (options, args) = parser.parse_args()
+    options = parser.parse_args()
     if options.Version:
         print("""
 PYGALOAD version %d.%d
@@ -540,10 +535,7 @@ Grand Valley State University
 """ % (VERSION_MAJOR, VERSION_MINOR))
         sys.exit(0)
 
-    if len(args) != 1:
-        parser.error("You must specify a HEX file for programming")
-
-    ih = IntelHex(args[0])
+    ih = IntelHex(options.programfile)
     hex_data = ih.todict()
     if not hex_data:
         print('*** HEX file is empty...nothing to download')
