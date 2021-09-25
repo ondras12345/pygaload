@@ -242,13 +242,9 @@ EEPROMSize = {
     0x34: 4096
 }
 
-HEXLAT = {}
-for val in range(256):
-    HEXLAT['%02X' % val] = val
 
-
-def parse8(line, offset, HEXLAT=HEXLAT):
-    return HEXLAT[line[offset:offset+2]]
+def parse8(line, offset):
+    return int(line[offset:offset+2], 16)
 
 
 def parse16(line, offset):
