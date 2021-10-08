@@ -232,6 +232,22 @@ EEPROMSize = {
     0x34: 4096
 }
 
+PROCINFO_ORDER_DEFAULT = [
+    "proc",
+    "flash",
+    "boot",
+    "page",
+    "eeprom",
+]
+
+PROCINFO_ORDER_EVB = [
+    "page",
+    "proc",
+    "flash",
+    "boot",
+    "eeprom"
+]
+
 
 def openDevice(options):
     dev = serial.Serial()
@@ -247,140 +263,160 @@ def openDevice(options):
     return dev
 
 
-CONNECT = 1     # Waiting for bootloader sync character
-SYNCED3 = 2     # Received 0x3E sync character from MegaLoad 3 bootloader
-SYNCED4 = 3     # Received 0x55 sync character from MegaLoad 4 bootloader
-GOTPROC = 4     # Received processor type
-GOTFLASH = 5     # Received flash size
-GOTBOOT = 6     # Received boot size
-GOTPAGE = 7     # Received page size
-GOTEEP = 8     # Received EEPROM size
-
-
 class Proc:
-    def __init__(self):
+    """Representation of a processor with MegaLoad bootloader.
+
+    Contains information like flash size, bootloader size and processor type.
+
+    Check is_complete before use, otherwise it may contain incorrect or
+    incomplete information.
+    """
+
+    class BadOrder(Exception):
         pass
+
+    class BadCharacter(Exception):
+        pass
+
+    def __init__(self):
+        self.loaderversion = None  # needs to be set externally
+        self.proc = None
+        self.page = None
+        self.flash = None
+        self.boot = None
+        self.eeprom = None
+        self.order_received = []
+
+    def decode_character(self, character):
+        """Decode character / byte sent by bootloader to processor attributes.
+
+        This only detects things like flash size. It does send anything to the
+        bootloader, so it cannot handle the initial sync.
+        """
+        _LOGGER.debug(f"Decoding character {character}")
+        c = ord(character)
+
+        # no character / byte has multiple meanings, so we don't have to check
+        # order_received every time we receive something. We can just raise
+        # an exception in is_valid.
+
+        steps = [
+            ("proc", Processors),
+            ("page", PageSize),
+            ("flash", FlashSize),
+            # boot needs to be handled separately
+            ("eeprom", EEPROMSize),
+        ]
+
+        # boot needs to be handled separately because it needs to be
+        # multiplied by 2.
+        if c in BootSize and self.boot is None:
+            # *2 because BootSize is in WORDS
+            self.boot = BootSize[c]*2
+            self.order_received.append("boot")
+            _LOGGER.debug(f"Got boot: {self.boot}")  # this is NOT in WORDS
+            return "boot"
+
+        for variable, lookup_table in steps:
+            if c in lookup_table and getattr(self, variable) is None:
+                setattr(self, variable, lookup_table[c])
+                self.order_received.append(variable)
+                _LOGGER.debug(f"Got {variable}: {getattr(self, variable)}")
+                return variable
+
+        raise self.BadCharacter(f"Unknown character: {character}")
+
+    def is_complete(self, expected_order=None):
+        """Return True if we have all the information.
+
+        Raises BadOrder if expected_order is provided and does not match
+        order_received.
+        """
+        if expected_order is not None and self.order_received != expected_order:
+            raise self.BadOrder(
+                    f"Expected {expected_order}; got {self.order_received}")
+
+        if any(a is None for a in [self.proc, self.page, self.flash,
+                                   self.boot, self.eeprom]
+               ):
+            return False
+
+        return True
 
 
 def doConnect(options):
+    CONNECT = 1     # Waiting for bootloader sync character
+    SYNCED3 = 2     # Received 0x3E sync character from MegaLoad 3 bootloader
+    SYNCED4 = 3     # Received 0x55 sync character from MegaLoad 4 bootloader
+    INFO = 4        # Started getting valid information
+    GOTALL = 5      # Got all processor specs. Waiting for '!' or '>'
+
     state = CONNECT
 
     P = Proc()
-    P.loaderversion = 0  # Not known yet
 
     tic = time.time()
     while (time.time()-tic) < options.Timeout:
         c = options.dev.read(1)
-        if c:
-            c = ord(c)
-            _LOGGER.debug(f"char received: {c}")
+        if not c:
+            if options.Verbose:
+                sys.stdout.write('.')
+                sys.stdout.flush()
+            continue
 
-            if state == CONNECT:
-                if c == 0x55:  # For MegaLoad 4 and 5
-                    options.dev.write(b'\x55')
-                    state = SYNCED4
-                    P.loaderversion = 4
-                elif c == 0x3E:  # For MegaLoad 3
-                    options.dev.write(b'\x3C')
-                    state = SYNCED3    # Maybe it's just junk, though, from a MegaLoad 4 bootloader
-                    P.loaderversion = 3
-                    _LOGGER.info("MegaLoad 3 detected")
+        _LOGGER.debug(f"char received: {c}")
 
-            elif state in (SYNCED3, SYNCED4):
-                if c in Processors:
-                    # Looks good...could be good data
-                    _LOGGER.info(f"Processor: {Processors[c]}")
-                    state = GOTPROC
-                    P.proc = Processors[c]
-                else:
-                    # Nope...we've just got garbage. Alternatively, we keep getting 0x55's from
-                    # a MegaLoad 4 bootloader that is doing auto-OSCCAL, or we got '>' from
-                    # MegaLoad 5.
-                    if state == SYNCED4:
-                        if c == 0x55:    # We're in auto-OSCCAL
-                            pass
-                        elif c == 0x3E:  # MegaLoad 5 sends '>'
-                            options.dev.write('\x3C')
-                            P.loaderversion = 5
-                        else:
-                            print('*** Unexpected processor type code: %s' % hex(c))
-                            sys.exit(1)
+        if state == CONNECT:
+            if ord(c) == 0x55:  # For MegaLoad 4 and 5
+                options.dev.write(b'\x55')
+                state = SYNCED4
+                P.loaderversion = 4
+                continue
+            elif ord(c) == 0x3E:  # For MegaLoad 3
+                options.dev.write(b'\x3C')
+                state = SYNCED3    # Maybe it's just junk, though, from a MegaLoad 4 bootloader
+                P.loaderversion = 3
+                _LOGGER.debug("MegaLoad 3 detected")
+                continue
 
-                    if state == SYNCED3 and options.workaround_evb:
-                        _LOGGER.info("applying EvB workaround")
-                        if c in PageSize:
-                            _LOGGER.info(f"(workaround) detected page Size: {PageSize[c]} bytes")
-                            P.page = PageSize[c]
-                            # not setting state --> will detect
-                            # processor next
-                        else:
-                            print(f"*** (workaround) Unexpected page size code: {hex(c)}")
-                            sys.exit(1)
-                    else:
-                        state = CONNECT
+        # We could keep getting 0x55's from a MegaLoad 4 bootloader that
+        # is doing auto-OSCCAL, or we got '>' from MegaLoad 5.
+        if state == SYNCED4:
+            if ord(c) == 0x55:    # We're in auto-OSCCAL
+                continue
+            elif ord(c) == 0x3E:  # MegaLoad 5 sends '>'
+                options.dev.write('\x3C')
+                P.loaderversion = 5
+                continue
 
-            elif state == GOTPROC:
-                if c in FlashSize:
-                    _LOGGER.info(f"Flash Size: {FlashSize[c]/1024}k")
-                    state = GOTFLASH
-                    P.flash = FlashSize[c]
-                else:
-                    print('*** Unexpected flash size code: %s' % hex(c))
-                    sys.exit(1)
+        if state in (SYNCED3, SYNCED4):
+            try:
+                P.decode_character(c)
+                state = INFO
+            except Proc.BadCharacter:
+                # Nope...we've just got garbage.
+                _LOGGER.debug(f"Got garbage: {c}")
+                state = CONNECT
+            finally:
+                continue
 
-            elif state == GOTFLASH:
-                if c in BootSize:
-                    _LOGGER.info(f"Boot Size: {BootSize[c]} words")
-                    state = GOTBOOT
-                    P.boot = BootSize[c]*2
-                else:
-                    print('*** Unexpected boot size code: %s' % hex(c))
-                    sys.exit(1)
+        if state != GOTALL:
+            P.decode_character(c)
+            # we don't check expected_order yet
+            if P.is_complete():
+                state = GOTALL
+                continue
 
-            elif state == GOTBOOT:
-                if options.workaround_evb:
-                    if c in EEPROMSize:
-                        _LOGGER.info(f"(workaround) EEPROM Size: {EEPROMSize[c]} bytes")
-                        state = GOTEEP
-                        P.eeprom = EEPROMSize[c]
-                    else:
-                        print('*** (workaround) Unexpected EEPROM size code: %s' % hex(c))
-                        sys.exit(1)
-                else:
-                    if c in PageSize:
-                        _LOGGER.info(f"Page Size: {PageSize[c]} bytes")
-                        state = GOTPAGE
-                        P.page = PageSize[c]
-                    else:
-                        print('*** Unexpected page size code: %s' % hex(c))
-                        sys.exit(1)
+        if state == GOTALL:
+            if ord(c) == 0x21:         # '!' means we're all done
+                # just check expected_order; it will for sure return True
+                P.is_complete(expected_order=options.procinfo_order)
+                _LOGGER.info(f'Using MegaLoad {P.loaderversion} protocol ...')
+                return P
+            elif ord(c) == 0x3E:     # '>' is MegaLoad 4, and comes before '!'
+                continue
 
-            elif state == GOTPAGE:
-                if c in EEPROMSize:
-                    _LOGGER.info(f"EEPROM Size: {EEPROMSize[c]} bytes")
-                    state = GOTEEP
-                    P.eeprom = EEPROMSize[c]
-                else:
-                    print('*** Unexpected EEPROM size code: %s' % hex(c))
-                    sys.exit(1)
-
-            elif state == GOTEEP:
-                if c == 0x21:         # '!' means we're all done
-                    _LOGGER.info(f'Using MegaLoad {P.loaderversion} protocol ...')
-                    return P
-                elif c == 0x3E:     # '>' is MegaLoad 4, and comes before '!'
-                    pass
-                else:
-                    print(f"*** Unexpected FLASH start code: {hex(c)}")
-                    sys.exit(1)
-
-        elif options.Verbose:
-            sys.stdout.write('.')
-            sys.stdout.flush()
-
-    # Timeout
-    _LOGGER.info('\n*** Timeout waiting for bootloader to connect')
-
+    _LOGGER.error('*** Timeout waiting for bootloader to connect')
     return None
 
 
@@ -514,8 +550,13 @@ if __name__ == "__main__":
                              "--send-reset='reset\\r\\n' or "
                              "--send-reset='\\x03'")
     parser.add_argument("-v", "--version", dest="Version", action="store_true", default=False, help="Print version info and exit")
-    parser.add_argument("--workaround-evb", action="store_true", default=False,
-                        help="work around an issue with EvB 5.1")
+    parser.add_argument("--procinfo-order", nargs=len(PROCINFO_ORDER_DEFAULT),
+                        default=PROCINFO_ORDER_DEFAULT,
+                        help="Order in which the bootloader sends information "
+                        "like flash size. "
+                        f"Default: `{' '.join(PROCINFO_ORDER_DEFAULT)}'. "
+                        "E.g. EvB 5.1 boards seem to "
+                        f"need `{' '.join(PROCINFO_ORDER_EVB)}'.")
     parser.add_argument("programfile", type=argparse.FileType("r"),
                         help="file to download (in HEX format)")
 
