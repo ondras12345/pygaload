@@ -1,5 +1,6 @@
 # pygaload
-A utility for [MegaLoad bootloaders][MegaLoad bootloader].
+A utility for [MegaLoad bootloaders][MegaLoad bootloader] (link seems dead,
+[archive][MegaLoad bootloader archive]).
 
 This version is based on
 [`pygaload.py` from Robopoly/lasermodules][original file].
@@ -42,7 +43,7 @@ optional arguments:
                         boot eeprom'.
 ```
 
-Example: upload blink.hex to EvB 5.1 board:
+Example: upload `blink.hex` to an EvB 5.1 board:
 ```console
 $ ./pygaload.py --verbose -p /dev/ttyUSB0 -b 57600 --procinfo-order page proc flash boot eeprom blink.hex
 ```
@@ -57,3 +58,4 @@ The [original file][original file] contained the following note:
 
 [original file]: https://github.com/Robopoly/lasermodules/blob/2333aa9272de6369d4d3a90a787136374d1e01da/pygaload.py
 [MegaLoad bootloader]: http://www.microsyl.com/index.php/2010/03/30/megaload/
+[MegaLoad bootloader archive]: https://web.archive.org/web/20210512054826/http://www.microsyl.com/index.php/2010/03/30/megaload/
